@@ -23,6 +23,7 @@ from zope.interface import implements, Interface, Attribute
 from twisted.internet.protocol import Protocol, ServerFactory, ClientFactory, \
     connectionDone
 from twisted.internet import defer
+from twisted.protocols.policies import TimeoutMixin
 from twisted.protocols import basic
 from twisted.python import log
 from twisted.web import server, resource, http
@@ -57,11 +58,11 @@ class TCallbackTransport(TMessageSenderTransport):
         self.func(message)
 
 
-class ThriftClientProtocol(basic.Int32StringReceiver):
+class ThriftClientProtocol(basic.Int32StringReceiver, TimeoutMixin):
 
     MAX_LENGTH = 2 ** 31 - 1
 
-    def __init__(self, client_class, iprot_factory, oprot_factory=None):
+    def __init__(self, client_class, iprot_factory, oprot_factory=None, timeOut=60):
         self._client_class = client_class
         self._iprot_factory = iprot_factory
         if oprot_factory is None:
@@ -69,10 +70,12 @@ class ThriftClientProtocol(basic.Int32StringReceiver):
         else:
             self._oprot_factory = oprot_factory
 
+        self.timeOut = timeOut
         self.recv_map = {}
         self.started = defer.Deferred()
 
     def dispatch(self, msg):
+        self.setTimeout(self.timeOut)
         self.sendString(msg)
 
     def connectionMade(self):
@@ -81,13 +84,14 @@ class ThriftClientProtocol(basic.Int32StringReceiver):
         self.started.callback(self.client)
 
     def connectionLost(self, reason=connectionDone):
-        for k, v in self.client._reqs.iteritems():
-            tex = TTransport.TTransportException(
-                type=TTransport.TTransportException.END_OF_FILE,
-                message='Connection closed')
-            v.errback(tex)
+        while self.client._reqs:
+            k, v = self.client._reqs.popitem()
+            v.errback(reason)
+
+        basic.Int32StringReceiver.connectionLost(self, reason)
 
     def stringReceived(self, frame):
+        self.resetTimeout()
         tr = TTransport.TMemoryBuffer(frame)
         iprot = self._iprot_factory.getProtocol(tr)
         (fname, mtype, rseqid) = iprot.readMessageBegin()
@@ -100,6 +104,11 @@ class ThriftClientProtocol(basic.Int32StringReceiver):
 
         method(iprot, mtype, rseqid)
 
+        if not self.client._reqs:
+            self.setTimeout(None)
+
+    def timeoutConnection(self):
+        self.connectionLost(defer.TimeoutError("Connection timeout"))
 
 class ThriftServerProtocol(basic.Int32StringReceiver):
 
