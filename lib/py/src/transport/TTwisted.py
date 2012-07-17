@@ -174,10 +174,6 @@ class ThriftServerFactory(ServerFactory):
         else:
             self.oprot_factory = oprot_factory
 
-        print 'A', type(self.iprot_factory), dir(self.iprot_factory)
-        print 'B', type(self.oprot_factory), dir(self.oprot_factory)
-
-
 class ThriftClientFactory(ClientFactory):
 
     implements(IThriftClientFactory)
