@@ -23,8 +23,7 @@ from zope.interface import implements, Interface, Attribute
 from twisted.internet.protocol import Protocol, ServerFactory, ClientFactory, \
     connectionDone
 from twisted.internet import defer
-from twisted.protocols.policies import TimeoutMixin
-from twisted.protocols import basic
+from twisted.protocols import basic, policies
 from twisted.python import log
 from twisted.web import server, resource, http
 
@@ -58,11 +57,11 @@ class TCallbackTransport(TMessageSenderTransport):
         self.func(message)
 
 
-class ThriftClientProtocol(basic.Int32StringReceiver, TimeoutMixin):
+class ThriftClientProtocol(basic.Int32StringReceiver, policies.TimeoutMixin):
 
     MAX_LENGTH = 2 ** 31 - 1
 
-    def __init__(self, client_class, iprot_factory, oprot_factory=None, timeOut=60):
+    def __init__(self, client_class, iprot_factory, oprot_factory=None,timeOut=60):
         self._client_class = client_class
         self._iprot_factory = iprot_factory
         if oprot_factory is None:
@@ -70,12 +69,17 @@ class ThriftClientProtocol(basic.Int32StringReceiver, TimeoutMixin):
         else:
             self._oprot_factory = oprot_factory
 
-        self.timeOut = timeOut
+        self.persistentTimeOut = self.timeOut = timeOut
         self.recv_map = {}
         self.started = defer.Deferred()
 
+    def timeoutConnection(self):
+        self.connectionLost(defer.TimeoutError("Connection timeout"))
+        policies.TimeoutMixin.timeoutConnection(self)
+
     def dispatch(self, msg):
-        self.setTimeout(self.timeOut)
+        if len(self.client._reqs) <= 1:
+            self.setTimeout(self.persistentTimeOut)
         self.sendString(msg)
 
     def connectionMade(self):
@@ -83,7 +87,9 @@ class ThriftClientProtocol(basic.Int32StringReceiver, TimeoutMixin):
         self.client = self._client_class(tmo, self._oprot_factory)
         self.started.callback(self.client)
 
-    def connectionLost(self, reason=connectionDone):
+    def connectionLost(self, reason):
+        self.setTimeout(None)
+
         while self.client._reqs:
             k, v = self.client._reqs.popitem()
             v.errback(reason)
@@ -107,8 +113,6 @@ class ThriftClientProtocol(basic.Int32StringReceiver, TimeoutMixin):
         if not self.client._reqs:
             self.setTimeout(None)
 
-    def timeoutConnection(self):
-        self.connectionLost(defer.TimeoutError("Connection timeout"))
 
 class ThriftServerProtocol(basic.Int32StringReceiver):
 
@@ -170,6 +174,9 @@ class ThriftServerFactory(ServerFactory):
         else:
             self.oprot_factory = oprot_factory
 
+        print 'A', type(self.iprot_factory), dir(self.iprot_factory)
+        print 'B', type(self.oprot_factory), dir(self.oprot_factory)
+
 
 class ThriftClientFactory(ClientFactory):
 
@@ -177,18 +184,22 @@ class ThriftClientFactory(ClientFactory):
 
     protocol = ThriftClientProtocol
 
-    def __init__(self, client_class, iprot_factory, oprot_factory=None):
+    timeOut = 60
+
+    def __init__(self, client_class, iprot_factory, oprot_factory=None,timeout=60):
         self.client_class = client_class
         self.iprot_factory = iprot_factory
         if oprot_factory is None:
             self.oprot_factory = iprot_factory
         else:
             self.oprot_factory = oprot_factory
+        self.timeOut = timeout
 
     def buildProtocol(self, addr):
         p = self.protocol(self.client_class, self.iprot_factory,
             self.oprot_factory)
         p.factory = self
+        p.timeOut = self.timeOut
         return p
 
 
